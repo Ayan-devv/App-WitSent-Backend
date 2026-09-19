@@ -1,0 +1,81 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum Status {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  COMPLETED
+  FAILED
+  PAUSED
+  CANCELLED
+}
+
+model User {
+  id           Int        @id @default(autoincrement())
+  email        String     @unique
+  name         String
+  password     String
+  role         Role       @default(USER)
+  status       Status     @default(PENDING)
+  phone        String?
+  profileImage String?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  campaigns    Campaign[]
+  contacts     Contact[]
+}
+
+model Campaign {
+  id            Int            @id @default(autoincrement())
+  userId        Int
+  user          User           @relation(fields: [userId], references: [id])
+  name          String
+  message       String
+  numbers       String[]
+  totalContacts Int            @default(0)
+  sent          Int            @default(0)
+  failed        Int            @default(0)
+  delay         Int            @default(5)
+  status        CampaignStatus @default(DRAFT)
+  mediaUrl      String?
+  mediaType     String?
+  mediaCaption  String?
+  scheduledAt   DateTime?
+  isScheduled   Boolean        @default(false)
+  successRate   Float?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  startedAt     DateTime?
+  completedAt   DateTime?
+}
+
+model Contact {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  phone     String
+  name      String?
+  tags      String?
+  createdAt DateTime @default(now())
+
+  @@unique([userId, phone])
+}
