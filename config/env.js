@@ -1,6 +1,9 @@
+if (!process.env.PORT) {
+  process.env.PORT = '4000';
+}
+
 const requiredEnvs = [
   'JWT_SECRET',
-  'PORT',
   'DATABASE_URL'
 ];
 
