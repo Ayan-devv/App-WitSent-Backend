@@ -2,8 +2,8 @@ const axios = require('axios');
 
 class OpenWAService {
   constructor() {
-    this.baseUrl = process.env.OPENWA_API_URL || 'http://localhost:2785/api';
-    this.apiKey = process.env.OPENWA_API_KEY || '';
+    this.baseUrl = process.env.OPENWA_API_URL || 'https://wa.witsent.online/api';
+    this.apiKey = process.env.OPENWA_API_KEY || 'owa_k1_c45c229c0b953c75ff494d69338764881888534f3e3039a4f044e513babd943f';
     this.api = axios.create({
       baseURL: this.baseUrl,
       timeout: 30000, // 30s timeout for slow engine starts
