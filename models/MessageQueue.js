@@ -28,8 +28,11 @@ const messageQueueSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['PENDING', 'SENT', 'FAILED', 'RETRY'],
+    enum: ['PENDING', 'PROCESSING', 'SENT', 'FAILED', 'RETRY'],
     default: 'PENDING'
+  },
+  processingStartedAt: {
+    type: Date
   },
   attempts: {
     type: Number,

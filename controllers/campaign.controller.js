@@ -4,6 +4,7 @@ const PromotionalMessage = require('../models/PromotionalMessage');
 const SentPromotionalLog = require('../models/SentPromotionalLog');
 const { executeCampaign, pauseCampaignExecution, cancelCampaignExecution } = require('../services/campaign.service');
 const { log } = require('../services/logger');
+const { sanitizePhoneNumber } = require('../utils/phoneSanitizer');
 const fs = require('fs');
 const path = require('path');
 
@@ -18,6 +19,23 @@ const createCampaign = async (req, res) => {
 
     if (!whatsappSessionId) {
       return res.status(400).json({ success: false, error: 'Please select a WhatsApp account' });
+    }
+
+    // Sanitize and deduplicate numbers
+    const rawNumbers = Array.isArray(numbers) ? numbers : (typeof numbers === 'string' ? numbers.split('\n') : []);
+    const sanitizedNumbers = [];
+    const seenNumbers = new Set();
+
+    for (const raw of rawNumbers) {
+      const sanitized = sanitizePhoneNumber(raw);
+      if (sanitized && !seenNumbers.has(sanitized)) {
+        seenNumbers.add(sanitized);
+        sanitizedNumbers.push(sanitized);
+      }
+    }
+
+    if (sanitizedNumbers.length === 0) {
+      return res.status(400).json({ success: false, error: 'No valid phone numbers found in the campaign list' });
     }
 
     const user = await User.findById(userId);
@@ -35,7 +53,7 @@ const createCampaign = async (req, res) => {
       );
     }
     
-    const messageCount = numbers.length;
+    const messageCount = sanitizedNumbers.length;
     if (totalSentToday + messageCount > user.dailyMessageLimit) {
       return res.status(429).json({
         success: false,
@@ -82,8 +100,8 @@ const createCampaign = async (req, res) => {
         mediaUrl,
         mediaType,
         mediaCaption,
-        numbers,
-        totalContacts: numbers.length,
+        numbers: sanitizedNumbers,
+        totalContacts: sanitizedNumbers.length,
         delay: parseInt(delay) || 10,
         isScheduled,
         scheduledAt: parsedScheduledAt,

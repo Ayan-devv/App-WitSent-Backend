@@ -28,6 +28,52 @@ class MessageQueueService {
   }
 
   /**
+   * Atomically claim the next pending/retry message to process (prevents race conditions and duplicate sends)
+   */
+  async claimNextMessage(campaignId) {
+    try {
+      const now = new Date();
+      // Recover stale PROCESSING messages (older than 2 minutes) if process crashed or restarted
+      const staleThreshold = new Date(Date.now() - 120000);
+      await MessageQueue.updateMany(
+        {
+          campaignId,
+          status: 'PROCESSING',
+          processingStartedAt: { $lt: staleThreshold }
+        },
+        {
+          $set: { status: 'PENDING' }
+        }
+      );
+
+      // Atomically find and lock the next message
+      const claimed = await MessageQueue.findOneAndUpdate(
+        {
+          campaignId,
+          status: { $in: ['PENDING', 'RETRY'] },
+          nextRetryAt: { $lte: now },
+          attempts: { $lt: 5 }
+        },
+        {
+          $set: {
+            status: 'PROCESSING',
+            processingStartedAt: now
+          }
+        },
+        {
+          sort: { nextRetryAt: 1, _id: 1 },
+          new: true
+        }
+      );
+
+      return claimed;
+    } catch (err) {
+      console.error('Claim next message error:', err);
+      return null;
+    }
+  }
+
+  /**
    * Get pending messages ready to send for a specific campaign or across all campaigns
    */
   async getPendingMessages(campaignId = null, limit = 50) {
@@ -118,6 +164,7 @@ class MessageQueueService {
     try {
       const stats = {
         pending: await MessageQueue.countDocuments({ campaignId, status: 'PENDING' }),
+        processing: await MessageQueue.countDocuments({ campaignId, status: 'PROCESSING' }),
         retry: await MessageQueue.countDocuments({ campaignId, status: 'RETRY' }),
         sent: await MessageQueue.countDocuments({ campaignId, status: 'SENT' }),
         failed: await MessageQueue.countDocuments({ campaignId, status: 'FAILED' })
@@ -125,7 +172,7 @@ class MessageQueueService {
       return stats;
     } catch (err) {
       console.error('Get queue stats error:', err);
-      return { pending: 0, retry: 0, sent: 0, failed: 0 };
+      return { pending: 0, processing: 0, retry: 0, sent: 0, failed: 0 };
     }
   }
 }
