@@ -71,10 +71,10 @@ whatsappSessionSchema.pre('save', function() {
   this.updatedAt = new Date();
 });
 
-// unique constraint per user and phone number (but allow multiple 'Pending...' accounts)
+// unique constraint per user and phone number for connected accounts only
 whatsappSessionSchema.index(
   { userId: 1, phoneNumber: 1 }, 
-  { unique: true, partialFilterExpression: { phoneNumber: { $ne: 'Pending...' } } }
+  { unique: true, partialFilterExpression: { isConnected: true } }
 );
 whatsappSessionSchema.index({ userId: 1 });
 whatsappSessionSchema.index({ phoneNumber: 1 });

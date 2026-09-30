@@ -112,15 +112,15 @@ const executeCampaign = async (campaignId) => {
       return;
     }
 
-    // 2. WhatsApp Client Setup & Connection Check
-    const stateRes = await openwaService.getSessionStatus(campaign.whatsappSessionId);
-    if (!stateRes.success || !['CONNECTED', 'connected', 'ready', 'READY'].includes(stateRes.status)) {
-      console.log(`Cannot execute campaign ${cId}: WhatsApp not connected`);
+    // 2. WhatsApp Client Setup & Connection Auto-Healing
+    const activeRes = await openwaService.ensureSessionActive(campaign.whatsappSessionId);
+    if (!activeRes.success) {
+      console.log(`Cannot execute campaign ${cId}: WhatsApp session not ready (${activeRes.error || activeRes.status})`);
       await progressTracker.pauseCampaign(cId, 'wa_disconnected');
       if (io) {
         io.to(`user-${campaign.userId}`).emit('campaign-paused', {
           campaignId: cId,
-          reason: 'WhatsApp connection lost',
+          reason: activeRes.status === 'needs_qr' ? 'WhatsApp requires QR re-linking' : 'WhatsApp connection lost',
           canResume: true
         });
       }
@@ -323,17 +323,15 @@ const executeCampaign = async (campaignId) => {
         }
         await logMessage(campaignId, campaign.userId, number, 'FAILED', captionToSend || messageToSend);
 
-        // Check if error was caused by WhatsApp disconnection
-        const sessionCheck = await openwaService.getSessionStatus(campaign.whatsappSessionId);
-        const isSessionAlive = sessionCheck.success && ['CONNECTED', 'connected', 'ready', 'READY'].includes(sessionCheck.status);
-
-        if (!isSessionAlive) {
-          console.error(`WhatsApp session ${campaign.whatsappSessionId} disconnected! Pausing campaign ${campaignId}`);
+        // Check if error was caused by WhatsApp disconnection and attempt auto-heal
+        const sessionCheck = await openwaService.ensureSessionActive(campaign.whatsappSessionId, 4000);
+        if (!sessionCheck.success) {
+          console.error(`WhatsApp session ${campaign.whatsappSessionId} not ready (${sessionCheck.error || sessionCheck.status})! Pausing campaign ${campaignId}`);
           await progressTracker.pauseCampaign(campaignId, 'wa_disconnected');
           if (io) {
             io.to(`user-${campaign.userId}`).emit('campaign-paused', {
               campaignId,
-              reason: 'WhatsApp connection lost',
+              reason: sessionCheck.status === 'needs_qr' ? 'WhatsApp requires QR re-linking' : 'WhatsApp connection lost',
               sent,
               failed
             });

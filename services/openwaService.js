@@ -49,6 +49,22 @@ class OpenWAService {
     }
   }
 
+  _extractErrorMessage(error) {
+    if (!error) return 'Unknown error';
+    if (error.response?.data) {
+      const data = error.response.data;
+      if (typeof data === 'string') return data;
+      if (data.message) {
+        return typeof data.message === 'string' ? data.message : JSON.stringify(data.message);
+      }
+      if (data.error) {
+        return typeof data.error === 'string' ? data.error : JSON.stringify(data.error);
+      }
+      return JSON.stringify(data);
+    }
+    return error.message || String(error);
+  }
+
   /**
    * Start a session in OpenWA
    */
@@ -67,8 +83,62 @@ class OpenWAService {
         console.log(`[OpenWA] Session ${sessionId} already started, continuing...`);
         return { success: true, data: { status: 'already_started' } };
       }
-      console.error(`[OpenWA] Failed to start session ${sessionId}:`, error?.response?.data || error.message);
-      return { success: false, error: error?.response?.data || error.message };
+      const errMsg = this._extractErrorMessage(error);
+      console.error(`[OpenWA] Failed to start session ${sessionId}:`, errMsg);
+      return { success: false, error: errMsg };
+    }
+  }
+
+  /**
+   * Ensure session is active and ready to send messages.
+   * If session was stopped/disconnected, attempts to auto-start and wait for ready state.
+   */
+  async ensureSessionActive(sessionId, maxWaitMs = 8000) {
+    try {
+      const openwaId = await this.getOpenwaId(sessionId);
+      if (!openwaId) return { success: false, error: 'Could not resolve session' };
+
+      // 1. Check current status
+      const statusRes = await this.getSessionStatus(sessionId);
+      if (statusRes.success) {
+        const curStatus = (statusRes.status || '').toLowerCase();
+        if (['ready', 'connected'].includes(curStatus)) {
+          return { success: true, status: statusRes.status, session: statusRes.session };
+        }
+      }
+
+      // 2. If disconnected or not loaded, start the session
+      console.log(`[OpenWA] Session ${sessionId} is inactive (status=${statusRes.status}). Attempting auto-recovery start...`);
+      await this.startSession(sessionId);
+
+      // 3. Poll for ready state
+      const start = Date.now();
+      while (Date.now() - start < maxWaitMs) {
+        await new Promise(r => setTimeout(r, 1000));
+        const check = await this.getSessionStatus(sessionId);
+        if (check.success) {
+          const s = (check.status || '').toLowerCase();
+          if (['ready', 'connected'].includes(s)) {
+            console.log(`[OpenWA] Session ${sessionId} successfully auto-healed to ${check.status}!`);
+            return { success: true, status: check.status, session: check.session };
+          }
+          if (s === 'qr_ready') {
+            console.log(`[OpenWA] Session ${sessionId} requires QR scan (not authenticated).`);
+            return { success: false, status: 'needs_qr', error: 'WhatsApp session requires QR authentication' };
+          }
+        }
+      }
+
+      const finalCheck = await this.getSessionStatus(sessionId);
+      const isOk = finalCheck.success && ['ready', 'connected'].includes((finalCheck.status || '').toLowerCase());
+      return { 
+        success: isOk, 
+        status: finalCheck.status || 'unknown',
+        error: isOk ? null : `Session did not reach ready state within ${maxWaitMs}ms (current: ${finalCheck.status})` 
+      };
+    } catch (err) {
+      console.error(`[OpenWA] ensureSessionActive error for ${sessionId}:`, err.message);
+      return { success: false, error: err.message };
     }
   }
 
@@ -83,7 +153,7 @@ class OpenWAService {
       const qrData = res.data.qrCode || res.data.qr || res.data;
       return { success: true, qr: qrData };
     } catch (error) {
-      return { success: false, error: error?.response?.data || error.message };
+      return { success: false, error: this._extractErrorMessage(error) };
     }
   }
 
@@ -96,7 +166,7 @@ class OpenWAService {
       const res = await this.api.get(`/sessions/${openwaId}`);
       return { success: true, status: res.data.status, session: res.data };
     } catch (error) {
-      return { success: false, error: error?.response?.data || error.message };
+      return { success: false, error: this._extractErrorMessage(error) };
     }
   }
 
@@ -196,13 +266,28 @@ class OpenWAService {
                   checkInterval = null;
                   console.log('[Socket] Session connected!');
                   const WhatsAppSession = require('../models/WhatsAppSession');
+                  const phone = statusRes.session?.phone || 'Unknown';
+                  
+                  // Clean up any older session with the exact same phone number for this user
+                  if (phone !== 'Unknown') {
+                    await WhatsAppSession.deleteMany({
+                      userId,
+                      phoneNumber: phone,
+                      _id: { $ne: sessionId }
+                    });
+                  }
+
                   await WhatsAppSession.findByIdAndUpdate(sessionId, {
                     isConnected: true,
                     status: 'CONNECTED',
-                    phoneNumber: statusRes.session.phone || 'Unknown',
-                    displayName: statusRes.session.pushName || 'WhatsApp User'
+                    phoneNumber: phone,
+                    displayName: statusRes.session?.pushName || 'WhatsApp User'
                   });
-                  socket.emit('connected', { number: statusRes.session.phone, sessionId });
+                  socket.emit('connected', { 
+                    number: phone, 
+                    pushname: statusRes.session?.pushName,
+                    sessionId 
+                  });
                   return;
                 }
               }
@@ -253,9 +338,9 @@ class OpenWAService {
   // --- MESSAGING ---
 
   /**
-   * Send a text message
+   * Send a text message with auto-healing
    */
-  async sendMessage(sessionId, phone, message) {
+  async sendMessage(sessionId, phone, message, isRetry = false) {
     try {
       const openwaId = await this.getOpenwaId(sessionId);
       const chatId = phone.includes('@') ? phone : `${phone}@c.us`;
@@ -265,15 +350,27 @@ class OpenWAService {
       });
       return { success: true, data: res.data };
     } catch (error) {
-      console.error(`[OpenWA] Failed to send message to ${phone}:`, error?.response?.data || error.message);
-      return { success: false, error: error?.response?.data || error.message };
+      const errMsg = this._extractErrorMessage(error);
+      console.error(`[OpenWA] Failed to send message to ${phone}:`, errMsg);
+
+      // Auto-heal if session was inactive/stopped
+      if (!isRetry && (errMsg.includes('not active') || errMsg.includes('Start the session first') || error?.response?.status === 400)) {
+        console.log(`[OpenWA] Session ${sessionId} inactive during send. Auto-healing...`);
+        const healRes = await this.ensureSessionActive(sessionId);
+        if (healRes.success) {
+          console.log(`[OpenWA] Auto-heal succeeded! Retrying message send to ${phone}...`);
+          return this.sendMessage(sessionId, phone, message, true);
+        }
+      }
+
+      return { success: false, error: errMsg };
     }
   }
 
   /**
-   * Send media message (image/video/document)
+   * Send media message (image/video/document) with auto-healing
    */
-  async sendMessageWithMedia(sessionId, phone, text, mediaPath, mediaType = 'image') {
+  async sendMessageWithMedia(sessionId, phone, text, mediaPath, mediaType = 'image', isRetry = false) {
     try {
       const openwaId = await this.getOpenwaId(sessionId);
       const chatId = phone.includes('@') ? phone : `${phone}@c.us`;
@@ -287,8 +384,20 @@ class OpenWAService {
       });
       return { success: true, data: res.data };
     } catch (error) {
-      console.error(`[OpenWA] Failed to send media to ${phone}:`, error?.response?.data || error.message);
-      return { success: false, error: error?.response?.data || error.message };
+      const errMsg = this._extractErrorMessage(error);
+      console.error(`[OpenWA] Failed to send media to ${phone}:`, errMsg);
+
+      // Auto-heal if session was inactive/stopped
+      if (!isRetry && (errMsg.includes('not active') || errMsg.includes('Start the session first') || error?.response?.status === 400)) {
+        console.log(`[OpenWA] Session ${sessionId} inactive during media send. Auto-healing...`);
+        const healRes = await this.ensureSessionActive(sessionId);
+        if (healRes.success) {
+          console.log(`[OpenWA] Auto-heal succeeded! Retrying media send to ${phone}...`);
+          return this.sendMessageWithMedia(sessionId, phone, text, mediaPath, mediaType, true);
+        }
+      }
+
+      return { success: false, error: errMsg };
     }
   }
 

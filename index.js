@@ -62,7 +62,21 @@ app.use(validateRequest); // Payload size and pattern checks
 app.use(sanitize);
 app.use(performance);
 
-connectDB();
+connectDB().then(async () => {
+  // Pre-warm / auto-initialize connected WhatsApp sessions after DB is ready
+  try {
+    const WhatsAppSession = require('./models/WhatsAppSession');
+    const sessions = await WhatsAppSession.find({ isConnected: true });
+    console.log(`[Startup] Pre-warming ${sessions.length} connected WhatsApp session(s)...`);
+    for (const session of sessions) {
+      openwaService.ensureSessionActive(session._id.toString()).catch(err => {
+        console.error(`[Startup] Failed to pre-warm session ${session._id}:`, err.message);
+      });
+    }
+  } catch (error) {
+    console.error('Failed to auto-initialize OpenWA sessions:', error.message);
+  }
+});
 
 // Health Check
 app.use('/health', healthRouter);
@@ -85,19 +99,7 @@ openwaService.setupWhatsAppSocket(io);
 startScheduler();
 startRetryWorker();
 
-// Auto-initialize sessions on startup
-const initializeSessions = async () => {
-  try {
-    const WhatsAppSession = require('./models/WhatsAppSession');
-    const sessions = await WhatsAppSession.find({ isConnected: true });
-    for (const session of sessions) {
-      await openwaService.startSession(session._id.toString());
-    }
-  } catch (error) {
-    console.error('Failed to auto-initialize OpenWA sessions:', error);
-  }
-};
-initializeSessions();
+
 
 // On startup: mark any warmers left in RUNNING/PAUSED state (from a crashed/restarted server) back to STOPPED
 // so users can see they need to restart them

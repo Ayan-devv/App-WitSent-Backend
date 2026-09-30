@@ -6,18 +6,17 @@ const path = require('path');
 
 const getAccounts = async (req, res) => {
   try {
-    // Auto-cleanup stale "Pending..." sessions older than 3 minutes
+    // Auto-cleanup stale pending/disconnected sessions older than 3 minutes
     const threeMinutesAgo = new Date(Date.now() - 3 * 60 * 1000);
     await WhatsAppSession.deleteMany({
       userId: req.user.id,
-      phoneNumber: 'Pending...',
       isConnected: false,
       createdAt: { $lt: threeMinutesAgo }
     });
 
     const accounts = await WhatsAppSession.find({ userId: req.user.id }).sort({ createdAt: -1 });
-    // Filter out Pending sessions from the response — they're only used internally during QR flow
-    const visibleAccounts = accounts.filter(a => a.phoneNumber !== 'Pending...' || a.isConnected);
+    // Only return accounts that are connected (or valid existing accounts)
+    const visibleAccounts = accounts.filter(a => a.isConnected);
     res.json({ success: true, accounts: visibleAccounts });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to fetch accounts' });
@@ -26,16 +25,16 @@ const getAccounts = async (req, res) => {
 
 const createPendingAccount = async (req, res) => {
   try {
-    // Delete any existing stale pending sessions for this user first
+    // Clean up any existing unlinked pending sessions for this user first
     await WhatsAppSession.deleteMany({
       userId: req.user.id,
-      phoneNumber: 'Pending...',
       isConnected: false
     });
 
+    const uniquePendingId = `pending_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     const session = await WhatsAppSession.create({
       userId: req.user.id,
-      phoneNumber: 'Pending...',
+      phoneNumber: uniquePendingId,
       displayName: 'New Account',
       isConnected: false
     });
